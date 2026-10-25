@@ -155,19 +155,6 @@ $$
 \widehat{\bar s}\approx0.0029959.
 $$
 
-Its error adds a positive term to the expected update:
-
-$$
-\mathbb E[g_{\mathrm{Top}}]
-=
-\mathbb E[g_{\mathrm{SC}}]
-+\mathbb E_q[R](\bar s-\widehat{\bar s})
-\approx
--0.0121621+0.0346181.
-$$
-
-That extra term is large enough to reverse the sign. MC Centering removes it in expectation because its estimated correction has mean $\bar s$.
-
 ### What this demonstrates
 
 Many tail tokens can contribute errors in the same direction when they share sensitivity to a parameter. Their contributions can collectively outweigh the useful reward signal, even though the logged head contains most of the probability mass.
