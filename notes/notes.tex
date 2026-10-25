@@ -1,0 +1,202 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[hidelinks]{hyperref}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\sg}{\operatorname{sg}}
+\newcommand{\Cov}{\operatorname{Cov}}
+\title{Correcting Tail Bias in Top-\(k\) Score Centering}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.5em}
+
+We use the notation from Appendix A of Marek and Ryabinin~\cite{marek2026}: $p_v$ and $q_v$ are trainer and sampler probabilities, $s_v=\nabla_\theta\log p_v$, and $y_t\sim q$. All expectations are conditional on a fixed prefix and fixed trainer parameters. Equation numbers below refer to this note unless explicitly identified as equations from the paper.
+
+\paragraph{Setting.}
+Exact score centering subtracts $\bar s=\sum_v q_v s_v$. To avoid storing all sampler probabilities, the paper logs probabilities only for the sampler's top-$k$ tokens, represented by the set $H$. For the remaining tokens in the tail set $T$, it estimates the missing probabilities using the trainer. With $Q_T=\sum_{v\in T}q_v$ and $P_T=\sum_{v\in T}p_v$, Eq.~(7) of the paper defines the approximate sampler distribution:
+\begin{equation}\label{eq:reconstruction}
+ \widehat q_v=\begin{cases}
+ q_v,&v\in H,\\
+ \rho p_v,&v\in T,
+ \end{cases}
+ \qquad \rho=Q_T/P_T.
+\end{equation}
+It assigns the correct total mass to the tail but assumes that the relative probabilities of tail tokens match the trainer's. The implementation therefore subtracts $\widehat{\bar s}=\sum_v\widehat q_v s_v$ instead of $\bar s$ (Eq.~(8) of the paper).
+
+
+\paragraph{Problem.}
+In this note, we target the systematic update error caused by this top-$k$ approximation. Let $\delta$ denote the error in the centering vector. Its effect on the expected update is
+\begin{equation}\label{eq:drift}
+\begin{aligned}
+ \delta&=\bar s-\widehat{\bar s}=\sum_{v\in T}(q_v-\rho p_v)s_v,\\
+ \E_q[R(s_{y_t}-\widehat{\bar s})]
+ &=\Cov_q(R,s_{y_t})+\E_q[R]\delta.
+\end{aligned}
+\end{equation}
+
+The extra term $\E_q[R]\delta$ appears because of the top-$k$ approximation. If it is nonzero, the approximation introduces an additional update beyond the reward--score covariance. We first show a case where the error is nonzero, then propose a simple fix that removes it in expectation.
+
+
+\paragraph{Counterexample (where $\delta$ matters).}
+Consider a toy vocabulary with three tokens $(A,B,C)$. Let $p=(0.990,0.009,0.001)$, $q=(0.990,0.001,0.009)$, and let the top-$k$ head be $H=\{A\}$. The trainable parameters are the three softmax logits, so $s_v=e_v-p$, where $e_v$ is the token's unit vector. The total tail mass (for tokens $B$ and $C$) is equal for the sampler and trainer, implying $\rho=1$, $\widehat q=p$, and $\widehat{\bar s}=0$.
+
+As in Section 4 of the paper, give every token reward $R=1$. The reward factor then drops out of the update, and the expected-reward objective is constant with zero gradient. Nevertheless, subtracting $\widehat{\bar s}$ produces a nonzero expected update:
+\begin{equation}\label{eq:toy}
+ \E_q[s_{y_t}-\widehat{\bar s}]=q-p=(0,-0.008,0.008),
+ \qquad \E_q[s_{y_t}-\bar s]=0.
+\end{equation}
+
+See \hyperref[app:toy]{appendix proof~1} for the derivation of \eqref{eq:toy}. This happens because the probabilities of tokens $B$ and $C$ differ between $p$ and $q$, and both tokens are outside the top-$k$ set $H$. Thus 99\% head coverage does not guarantee a zero mean update for constant rewards.
+
+\paragraph{Proposed fix.}
+We estimate the missing tail contribution using a few tokens sampled from the sampler's conditional tail distribution. Before discarding the full sampler distribution, draw $m\ge1$ auxiliary token IDs $\mathbf z=(z_1,\ldots,z_m)$ from $q$ restricted to the tail set $T$. Store these IDs rather than their sampler probabilities. For the Monte Carlo estimate, draw independently with replacement, and independently of the actual rollout and reward, conditional on the prefix.
+
+We define a Monte Carlo centering term $\bar s_{\rm MC}$ to use in place of $\widehat{\bar s}$:
+
+\begin{equation}\label{eq:estimator}
+ \Pr(z_j=v)=\frac{q_v}{Q_T}\quad(v\in T),\qquad
+ \bar s_{\rm MC}=\sum_{v\in H}q_v s_v+\frac{Q_T}{m}\sum_{j=1}^m s_{z_j}.
+\end{equation}
+The derivation of \eqref{eq:estimator} is given in \hyperref[app:unbiased]{appendix proof~2}. If $Q_T=0$, the head is already exact and no tail draws are needed. The estimate and the resulting update satisfy
+\begin{equation}\label{eq:guarantee}
+ \E_{\mathbf z}[\bar s_{\rm MC}]=\bar s,\qquad
+ \E_{y_t,R,\mathbf z}[R(s_{y_t}-\bar s_{\rm MC})]=\Cov_q(R,s_{y_t}).
+\end{equation}
+The first claim in \eqref{eq:guarantee} is proved in \hyperref[app:unbiased]{appendix proof~2}; independence gives $\E[R(\bar s_{\rm MC}-\bar s)]=\E[R]\E_{\mathbf z}[\bar s_{\rm MC}-\bar s]=0$, proving the second. The estimator applies Liu et al.'s existing construction: sum the head exactly and sample the tail~\cite{liu2019}.
+
+
+\paragraph{Implementation.}
+The corresponding scalar loss, modifying Eq.~(6) of the paper, is
+\begin{equation}\label{eq:loss}
+ L=-\sg(R)\left[\log p_{y_t}-\sum_{v\in H}\sg(q_v)\log p_v
+ -\frac{\sg(Q_T)}{m}\sum_{j=1}^m\log p_{z_j}\right].
+\end{equation}
+Store $m$ extra token IDs and evaluate their trainer log-probabilities. 
+In \texttt{README.md}, we include a pseudo-code of the minimal changes required in the sampler implemented using vLLM or SGLang. The variance cost is derived in \hyperref[app:variance]{Appendix~3}.
+
+
+\paragraph{Experiments.}
+We simulate this toy example using \texttt{simulate\_toy.py}, which enumerates the possible draws to compute exact mean updates and checks them with 500,000 Monte Carlo trials. The exact mean update is $(0,-0.008,0.008)$ for approximate top-$k$ centering and zero for both full centering (the exact reference) and the proposed Monte Carlo fix.
+
+While the toy example is interpretable, it is far from real-world scenarios. We also include a simulation with a vocabulary of 152,064 tokens showing a case closer to real-world settings.
+
+\paragraph{Practical Implications.}
+The hypothesis under consideration in this note is a systematic sampler--trainer difference across tail tokens. 
+
+Although speculative, possible scenarios in which this effect may have a major impact include:
+\begin{itemize}
+    \item Multilingual or specialist text: related script tokens or technical terms may exhibit coherent tail mismatches.
+    \item Code and tool arguments: tail mismatches may bias updates for rare identifiers or argument values.
+\end{itemize}
+
+
+\paragraph{AI Assistance.}
+We used AI assistants to polish the writing of this note and to understand the literature. After identifying the top-K limitation addressed in this note, we used AI tools to craft proofs and synthetic simulations, which we thoroughly verified.
+
+
+
+
+
+
+
+\clearpage
+\section*{Appendix: Proofs}
+\phantomsection\label{app:proofs}
+\setcounter{equation}{0}
+\renewcommand{\theequation}{A.\arabic{equation}}
+
+The proofs below establish the counterexample, unbiasedness of the estimated centering term, and its variance cost. All expectations are conditional on the same fixed prefix and fixed trainer parameters.
+
+\subsection*{1. The constant-reward counterexample}
+\phantomsection\label{app:toy}
+We prove \eqref{eq:toy}, the difference between the expected updates under approximate and full centering for constant rewards.
+
+For directly trainable softmax logits ($\ell_v$):
+\begin{equation}
+\begin{aligned}
+ p_v&=\frac{\exp(\ell_v)}{\sum_u\exp(\ell_u)},\\
+ \frac{\partial\log p_v}{\partial\ell_u}
+ &=\mathbf 1\{u=v\}-p_u,
+ \qquad s_v=\nabla_\ell\log p_v=e_v-p.
+\end{aligned}
+\end{equation}
+$e_v$ is the unit vector for token $v$. In the counterexample, equal tail masses give $\rho=1$ and $\widehat q=p$. Consequently,
+\begin{equation}
+\begin{aligned}
+ \bar s&=\sum_vq_v(e_v-p)=q-p=(0,-0.008,0.008),\\
+ \widehat{\bar s}&=\sum_vp_v(e_v-p)=0.
+\end{aligned}
+\end{equation}
+With reward one for every token, the true objective has zero gradient:
+\begin{equation}
+ J(\ell)=\sum_vp_v\cdot 1=1,\qquad \nabla_\ell J=0.
+\end{equation}
+But the two centering rules give different expected updates:
+\begin{equation}
+\begin{aligned}
+ \E_q[s_{y_t}-\widehat{\bar s}]
+ &=\bar s-\widehat{\bar s}=(0,-0.008,0.008),\\
+ \E_q[s_{y_t}-\bar s]&=0.
+\end{aligned}
+\end{equation}
+This proves \eqref{eq:toy}.
+
+\subsection*{2. Unbiased estimation of the tail contribution}
+\phantomsection\label{app:unbiased}
+We derive the estimator in \eqref{eq:estimator} and prove the first claim in \eqref{eq:guarantee}: its expected centering vector equals $\bar s$. The missing contribution from the tail set can be written as
+\begin{equation}\label{eq:tail-decomposition}
+ \sum_{v\in T}q_vs_v
+ =Q_T\sum_{v\in T}\frac{q_v}{Q_T}s_v
+ =Q_T\E_{z\sim q(\cdot\mid T)}[s_z].
+\end{equation}
+Replacing this conditional expectation by a sample average gives \eqref{eq:estimator}. Each draw has the conditional mean in \eqref{eq:tail-decomposition}. By linearity of expectation,
+\begin{equation}\label{eq:unbiased-proof}
+\begin{aligned}
+ \E_{\mathbf z}[\bar s_{\rm MC}]
+ &=\sum_{v\in H}q_vs_v+\frac{Q_T}{m}\sum_{j=1}^m\E[s_{z_j}]\\
+ &=\sum_{v\in H}q_vs_v+\frac{Q_T}{m}\,m\sum_{v\in T}\frac{q_v}{Q_T}s_v\\
+ &=\sum_vq_vs_v=\bar s.
+\end{aligned}
+\end{equation}
+This proves the first claim in \eqref{eq:guarantee}.
+
+\subsection*{3. Variance cost and the benefit of summing the head}
+\phantomsection\label{app:variance}
+Assume finite second moments. For a random vector $X$, write
+$\Cov(X)=\E[(X-\E X)(X-\E X)^\top]$ for its covariance matrix.
+The head contribution is fixed at the prefix. Independence of the $m$ tail draws therefore gives
+\begin{equation}
+\begin{aligned}
+ \Cov_{\mathbf z}(\bar s_{\rm MC})
+ &=\frac{Q_T^2}{m^2}\sum_{j=1}^m\Cov(s_{z_j})\\
+ &=\frac{Q_T^2}{m}\Cov_{q(\cdot\mid T)}(s_z),
+\end{aligned}
+\end{equation}
+If $Q_T=0$, the head is exact and this covariance is zero.
+
+An alternative is to draw $x_1,\ldots,x_m$ independently from the full sampler distribution $q$ and average their scores:
+\begin{equation}
+ \bar s_q=\frac1m\sum_{j=1}^m s_{x_j},\qquad
+ \E[\bar s_q]=\bar s,\qquad
+ \Cov(\bar s_q)=\frac1m\Cov_q(s_x).
+\end{equation}
+This is also unbiased, provided the draws are independent of the rollout and reward. Summing the head exactly instead leaves only conditional-tail uncertainty, multiplied by $Q_T^2$. This factor is desirable when the head contains most of the probability mass; it is not generally the exact variance ratio between the two estimators, since their score covariances differ.
+
+Finally, define $g_{\rm full}=R(s_{y_t}-\bar s)$ and $g_{\rm MC}=R(s_{y_t}-\bar s_{\rm MC})$. With $\delta_{\rm MC}=\bar s_{\rm MC}-\bar s$, we have $g_{\rm MC}=g_{\rm full}-R\delta_{\rm MC}$. The error $\delta_{\rm MC}$ has zero mean and is independent of $(y_t,R)$, so the cross-covariances vanish. Hence
+\begin{equation}\label{eq:update-variance}
+ \Cov(g_{\rm MC})=\Cov(g_{\rm full})
+ +\E[R^2]\frac{Q_T^2}{m}\Cov_{q(\cdot\mid T)}(s_z).
+\end{equation}
+This is an added variance cost relative to full centering. The sampled estimator need not have lower total error than the deterministic top-$k$ approximation; when $p=q$, that approximation is already exact while tail sampling can still add noise.
+
+\begin{thebibliography}{9}
+\setlength{\itemsep}{0pt}
+\bibitem{marek2026} M. Marek and M. Ryabinin. \emph{Score Centering Stabilizes Off-policy Reinforcement Learning}. 2026. \url{https://arxiv.org/abs/2609.20807}.
+\bibitem{liu2019} R. Liu et al. \emph{Rao-Blackwellized Stochastic Gradients for Discrete Distributions}. ICML, 2019. \url{https://proceedings.mlr.press/v97/liu19c.html}.
+\end{thebibliography}
+\end{document}
