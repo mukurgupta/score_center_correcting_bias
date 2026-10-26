@@ -15,9 +15,13 @@
 \maketitle
 \vspace{-2.5em}
 
-We use the notation from Appendix A of Marek and Ryabinin~\cite{marek2026}: $p_v$ and $q_v$ are trainer and sampler probabilities, $s_v=\nabla_\theta\log p_v$, and $y_t\sim q$. All expectations are conditional on a fixed prefix and fixed trainer parameters. Equation numbers below refer to this note unless explicitly identified as equations from the paper.
+\paragraph{Abstract.}
+Top-$k$ approximations to score centering can introduce systematic update bias when the sampler and trainer disagree on the probability distribution over the unlogged tail. We establish this failure mode through a minimal three-token counterexample and propose an unbiased correction that computes the logged-head contribution exactly while estimating the tail contribution using independent Monte Carlo samples from the sampler's conditional tail distribution. We prove that the corrected estimator recovers full score centering in expectation. A synthetic simulation involving 152,064 tokens further demonstrates that, under sampler-trainer tail mismatch, the top-$k$ approximation can reverse the direction of the expected update relative to full centering. This note presents the problem and the correction, and provides accompanying simulation code and pseudocode for integration with vLLM and SGLang samplers.\footnote{Simulation code and implementation details: \url{https://github.com/mukurgupta/score_center_correcting_bias}.}
+
 
 \paragraph{Setting.}
+We use the notation from Appendix A of Marek and Ryabinin~\cite{marek2026}: $p_v$ and $q_v$ are trainer and sampler probabilities, $s_v=\nabla_\theta\log p_v$, and $y_t\sim q$. All expectations are conditional on a fixed prefix and fixed trainer parameters. Equation numbers below refer to this note unless explicitly identified as equations from the paper.
+
 Exact score centering subtracts $\bar s=\sum_v q_v s_v$. To avoid storing all sampler probabilities, the paper logs probabilities only for the sampler's top-$k$ tokens, represented by the set $H$. For the remaining tokens in the tail set $T$, it estimates the missing probabilities using the trainer. With $Q_T=\sum_{v\in T}q_v$ and $P_T=\sum_{v\in T}p_v$, Eq.~(7) of the paper defines the approximate sampler distribution:
 \begin{equation}\label{eq:reconstruction}
  \widehat q_v=\begin{cases}
